@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  rest-api-stream
+
+  Sample SAM Template for rest-api-stream
+  
+Globals:
+  Function:
+    Timeout: 180
+
+Parameters:
+  APIGatewayStage:
+    Type: String
+    Default: dev
+
+Resources:
+  # IAM Policy と IAM Role
+  HandlerDefaultRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName : !Sub "${AWS::StackName}-HandlerDefaultRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+ 
+      
+  BedrockServiceRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Action:
+              - 'bedrock:InvokeModel'
+              - 'bedrock:InvokeModelWithResponseStream'
+            Effect: Allow
+            Resource: 
+              - '*'
+        Version:  "2012-10-17"
+      PolicyName: !Sub "${AWS::StackName}-HandlerServiceRolePolicyBedrock"
+      Roles:
+        - Ref: HandlerDefaultRole
+
+  # Lambda 関数
+  ResponseStreamFunction:
+    Type: AWS::Serverless::Function 
+    Properties:
+      FunctionName:  !Sub "${AWS::StackName}-function"
+      CodeUri: response-stream-function/
+      Role: !GetAtt HandlerDefaultRole.Arn
+      Handler: app.handler
+      Runtime: nodejs24.x
+      Architectures:
+        - x86_64
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ResponseStreamFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*'
+
+  # API Gateway REST API
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name:  !Sub "${AWS::StackName}-api"
+      Description: API Gateway with response streaming for Bedrock
+
+  StreamResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: stream
+
+  StreamMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref StreamResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2021-11-15/functions/${ResponseStreamFunction.Arn}/response-streaming-invocations'
+        ResponseTransferMode: STREAM
+        TimeoutInMillis: 300000
+
+  OptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref StreamResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  Deployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - StreamMethod
+      - OptionsMethod
+    Properties:
+      RestApiId: !Ref RestApi
+
+  Stage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref Deployment
+      StageName: !Ref APIGatewayStage
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${APIGatewayStage}/stream'
+  TestCommand:
+    Description: Test command using curl
+    Value: !Sub |
+      curl --no-buffer https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${APIGatewayStage}/stream
