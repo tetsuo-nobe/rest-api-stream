@@ -42,4 +42,4 @@
 
 * [統合リクエスト] で Lambda 関数のプロキシ統合を指定して、[レスポンス転送モード] で [ストリーム] を選択する　
 
-![alt text](image.png)
+![alt text](image1.png)
